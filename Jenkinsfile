@@ -18,7 +18,7 @@ pipeline {
         MODEL_REGISTRY = "s3://${S3_BUCKET}/models"
 
         SLACK_CHANNEL = '#ml-pipeline'
-        EMAIL_RECIPIENTS = 'team@company.com'
+        EMAIL_RECIPIENTS = 'mikemurango00@gmail.com'
     }
 
     triggers {
