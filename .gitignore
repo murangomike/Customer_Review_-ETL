@@ -1,0 +1,6 @@
+venv
+.env
+.git
+__pycache__/
+*.pyc
+customer_reviews.csv  # If it's not needed inside Docker

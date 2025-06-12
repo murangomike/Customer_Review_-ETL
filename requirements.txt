@@ -1,0 +1,264 @@
+extract.py
+import os
+import pandas as pd
+from neo4j import GraphDatabase
+# Load credentials from environment variables
+Neo4j_URI = os.getenv("NEO4J_URI")
+Neo4j_USERNAME = os.getenv("NEO4J_USERNAME")
+Neo4j_PASSWORD = os.getenv("NEO4J_PASSWORD")
+# Initialize Neo4j driver
+driver = GraphDatabase.driver(
+    Neo4j_URI,
+    auth=(Neo4j_USERNAME, Neo4j_PASSWORD)
+)
+# Function to query all reviews
+def fetch_all_reviews():
+    query = """
+    MATCH (r:RawReview)
+    RETURN r.id AS id, r.name AS name, r.rating AS rating, r.date AS date, r.text AS review
+    ORDER BY id
+    """
+    with driver.session() as session:
+        result = session.run(query)
+        records = result.data()
+        return pd.DataFrame(records)
+# Run and preview
+if name == "main":
+    df = fetch_all_reviews()
+    print(df.head())
+
+cleaner.py
+import pandas as pd
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer, WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+
+class Cleaner:
+    def init(self):
+        # Download stopwords and tokenizers
+        nltk.download('stopwords')
+        nltk.download('punkt')
+        nltk.download('wordnet')
+
+        self.stop_words = set(stopwords.words('english'))
+        self.stemmer = PorterStemmer()
+        self.lemmatizer = WordNetLemmatizer()
+
+    def clean_dataframe(self, df):
+        df = df.drop(columns=['Unnamed: 0', 'Name'], errors='ignore')
+        df = df.drop_duplicates()
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.reset_index(drop=True)
+        return df
+
+    def preprocess(self, text):
+        text = text.lower()
+        text = re.sub(r'[^a-z\s]', '', text)
+        words = nltk.word_tokenize(text)
+        words = [word for word in words if word not in self.stop_words]
+        words = [self.stemmer.stem(word) for word in words]
+        return " ".join(words)
+
+    def vectorize_themes(self, df):
+        vectorizer = TfidfVectorizer(max_df=0.9, min_df=2, stop_words='english', ngram_range=(1, 2))
+        dtm = vectorizer.fit_transform(df['processed_review'])
+
+        lda = LatentDirichletAllocation(n_components=5, random_state=42)
+        lda.fit(dtm)
+
+        topic_values = lda.transform(dtm)
+        df['topic'] = topic_values.argmax(axis=1)
+
+        for idx, topic in enumerate(lda.components_):
+            print(f"Topic {idx}: ", [vectorizer.get_feature_names_out()[i] for i in topic.argsort()[-10:]])
+
+        topic_labels = {
+            0: 'Customer Support Delay',
+            1: 'Billing & Subscription Issues',
+            2: 'Poor Service Experience',
+            3: 'Account Deletion Problems',
+            4: 'Unwanted Deliveries'
+        }
+
+        df['theme'] = df['topic'].map(topic_labels)
+
+        df.to_csv("processed_reviews.csv", index=False)
+        return df
+
+if name == "main":
+    cleaner = Cleaner()
+
+dashboard.py
+
+# theme_dashboard.py
+
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+import plotly.express as px
+
+# Load cleaned dataframe
+@st.cache_data
+def load_dataframe():
+    # Make sure 'processed_reviews.csv' exists in your working directory
+    return pd.read_csv("processed_reviews.csv")  # This CSV should contain 'processed_view' and 'theme' columns
+
+df = load_dataframe()
+
+# Page title
+st.title("NLP Review Theme Analysis Dashboard")
+
+# Sidebar theme filter
+theme_filter = st.sidebar.selectbox("Filter by Theme", ["All"] + sorted(df["theme"].unique()))
+
+# Filtered dataframe
+if theme_filter != "All":
+    df = df[df["theme"] == theme_filter]
+
+# --- Theme Counts ---
+st.subheader("Theme Distribution")
+theme_counts = df["theme"].value_counts().reset_index()
+theme_counts.columns = ["Theme", "Count"]
+fig = px.bar(theme_counts, x="Theme", y="Count", color="Theme", title="Number of Reviews per Theme")
+st.plotly_chart(fig)
+
+# --- Word Cloud ---
+st.subheader("Word Cloud")
+text = " ".join(df["processed_review"].dropna())
+wordcloud = WordCloud(width=800, height=400, background_color='white').generate(text)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.imshow(wordcloud, interpolation='bilinear')
+ax.axis("off")
+st.pyplot(fig)
+
+# --- Table of Reviews ---
+st.subheader("Sample Reviews")
+st.dataframe(df[["processed_review", "theme"]].reset_index(drop=True).head(10))
+
+loader.py
+import boto3
+import os
+import io
+
+aws_access_key=os.getenv('aws_access_key')
+aws_secret_key=os.getenv('aws_secret_key')
+
+def upload_df_to_s3(df, bucket_name, object_key, aws_access_key, aws_secret_key, region=None):
+    """
+    Uploads a pandas DataFrame as a CSV to an S3 bucket.
+
+    Args:
+        df (pd.DataFrame): The DataFrame to upload.
+        bucket_name (str): Name of the S3 bucket.
+        object_key (str): The key (path/filename) under which to store the object.
+        aws_access_key (str): Optional AWS access key.
+        aws_secret_key (str): Optional AWS secret key.
+        region (str): Optional AWS region.
+    """
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+
+    if aws_access_key and aws_secret_key:
+        session = boto3.Session(
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            region_name=region,
+        )
+        s3 = session.client('s3')
+    else:
+        # Use credentials from environment or IAM role
+        s3 = boto3.client('s3')
+
+    s3.put_object(Bucket=bucket_name, Key=object_key, Body=csv_buffer.getvalue())
+    print(f"✅ Uploaded to s3://{bucket_name}/{object_key}")
+
+requirements.txt
+pandas
+neo4j
+python-dotenv
+boto3
+
+The purpose of this pipeline is to extract data from neo4j graphdatabase, clean it, load it to s3 bucket and then use the data from s3 bucket to do the dashboard.
+
+now, can you correct each file and polish it then create a jenkins file and airflow file
+
+pipeline is as follows
+Pipeline Stages:
+* Load dataset
+* Preprocess features
+* Train model
+* Evaluate performance
+* Log metrics
+kicks off training every 1 hour
+
+I'll help you correct and polish each file, then create Jenkins and Airflow configurations for your ML pipeline. Let me start by fixing the existing files and then create the additional pipeline files.
+
+
+extract.py - Enhanced Data Extraction
+Code 
+
+cleaner.py - Enhanced Data Preprocessing
+Code 
+
+loader.py - Enhanced S3 Data Loader
+Code 
+
+dashboard.py - Enhanced Streamlit Dashboard
+Code 
+
+
+
+Continue
+
+
+dashboard.py - Enhanced Streamlit Dashboard
+Code 
+
+requirements.txt - Enhanced Dependencies
+Code 
+
+Jenkinsfile - CI/CD Pipeline
+Code 
+
+
+
+# Core data processing
+pandas>=1.5.0
+numpy>=1.21.0
+
+# Database and cloud storage
+neo4j>=5.0.0
+boto3>=1.26.0
+botocore>=1.29.0
+
+# Machine learning and NLP
+scikit-learn>=1.1.0
+nltk>=3.8
+joblib>=1.2.0
+
+# Visualization and dashboard
+streamlit>=1.25.0
+matplotlib>=3.6.0
+seaborn>=0.11.0
+plotly>=5.15.0
+wordcloud>=1.9.0
+
+# Environment and configuration
+python-dotenv>=0.19.0
+
+# Optional: for enhanced NLP (uncomment if needed)
+# spacy>=3.4.0
+# transformers>=4.20.0
+
+# Development and testing (optional)
+# pytest>=7.0.0
+# black>=22.0.0
+# flake8>=5.0.0
+
+# Logging and monitoring
+# mlflow>=2.0.0 (uncomment for experiment tracking)

@@ -1,0 +1,220 @@
+version: '3.8'
+
+services:
+  # Neo4j Database
+  neo4j:
+    image: neo4j:5.11-community
+    container_name: ml-pipeline-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2G
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+    networks:
+      - ml-pipeline
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # PostgreSQL for Airflow metadata
+  postgres:
+    image: postgres:14
+    container_name: ml-pipeline-postgres
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ml-pipeline
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Redis for Airflow Celery (if using CeleryExecutor)
+  redis:
+    image: redis:7-alpine
+    container_name: ml-pipeline-redis
+    networks:
+      - ml-pipeline
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Main ML Pipeline Application (Airflow mode)
+  ml-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: ml-pipeline-airflow
+    environment:
+      - MODE=airflow
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__FERNET_KEY=your-32-character-fernet-key-here
+      - AIRFLOW__WEBSERVER__SECRET_KEY=your-secret-key-here
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+      - AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK=true
+      # ML Pipeline specific
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=password
+      - AWS_DEFAULT_REGION=us-east-1
+      - S3_BUCKET=ml-pipeline-bucket
+    ports:
+      - "8080:8080"  # Airflow webserver
+      - "8501:8501"  # Streamlit dashboard
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./scripts:/opt/airflow/dags/scripts
+      - airflow_data:/opt/airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ml-pipeline
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+
+  # Standalone ML Pipeline (alternative to Airflow)
+  ml-pipeline-standalone:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: ml-pipeline-standalone
+    environment:
+      - MODE=standalone
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=password
+      - AWS_DEFAULT_REGION=us-east-1
+      - S3_BUCKET=ml-pipeline-bucket
+    ports:
+      - "8502:8501"  # Streamlit dashboard (different port)
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - ml-pipeline
+    profiles:
+      - standalone
+
+  # Dashboard Only
+  ml-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: ml-pipeline-dashboard
+    environment:
+      - MODE=dashboard
+    ports:
+      - "8503:8501"  # Streamlit dashboard (different port)
+    volumes:
+      - ./data:/app/data
+    networks:
+      - ml-pipeline
+    profiles:
+      - dashboard
+
+  # MinIO (S3-compatible storage for local development)
+  minio:
+    image: minio/minio:latest
+    container_name: ml-pipeline-minio
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Console
+    volumes:
+      - minio_data:/data
+    networks:
+      - ml-pipeline
+    profiles:
+      - local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Jupyter Notebook for development
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: ml-pipeline-jupyter
+    environment:
+      - MODE=jupyter
+    command: |
+      bash -c "
+        pip install jupyter &&
+        jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
+      "
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/app/notebooks
+      - ./data:/app/data
+      - ./scripts:/app/scripts
+    depends_on:
+      - neo4j
+    networks:
+      - ml-pipeline
+    profiles:
+      - dev
+
+volumes:
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  neo4j_import:
+    driver: local
+  postgres_data:
+    driver: local
+  airflow_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  ml-pipeline:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
