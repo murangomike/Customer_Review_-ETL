@@ -32,4 +32,4 @@ black>=22.0.0
 flake8>=5.0.0
 
 # Logging and monitoring
-mlflow>=2.0.0 (uncomment for experiment tracking)
+mlflow>=2.0.0 
